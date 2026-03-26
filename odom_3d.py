@@ -3,6 +3,7 @@ import os
 from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
 import pandas as pd
+import pyboreas as pb
 
 from pyboreas.utils.odometry import (
     read_traj_file_gt
@@ -13,10 +14,13 @@ from pyboreas.utils.odometry import (
 def main():
     data_root = "/media/ced/Extreme Pro/data/boreas/rss/test"
     velocities_root = "output_2d"
+    sequences = ['boreas-2024-12-03-12-54']
+
+    dro3DCalibration(data_root, velocities_root, sequences)
+
+
     sequences = ['boreas-2024-12-03-12-54',
                  'boreas-2024-12-10-12-07']
-
-    #dro3DCalibration(data_root, velocities_root, sequences)
 
     for sequence in sequences:
         data_path = os.path.join(data_root, sequence, "imu/dmu_imu.csv")
@@ -30,14 +34,14 @@ def main():
         T_radar_applanix = T_radar_lidar @ np.linalg.inv(T_applanix_lidar)
 
         # Read the lidar times for the output (needed as the evaluation is done in the lidar frame).
-        #lidar_times = np.loadtxt(os.path.join(data_root, sequence, "applanix/lidar_poses.csv"), delimiter=',', skiprows=1)[:, 0] * 1e-6
-        lidar_gt_poses, lidar_times = readGTLidarBoreas(os.path.join(data_root, sequence, "applanix/lidar_poses.csv"))
+        _, lidar_times = readGTLidarBoreas(os.path.join(data_root, sequence, "applanix/lidar_poses.csv"))
 
-        traj = droOdom3DOffline(data_path, velocities_path, T_radar_dmu, 1.0, lidar_times)
+        scale_z = np.loadtxt(os.path.join("calib", "radar_vel_z_scale.txt"))
+
+
+        traj = droOdom3DOffline(data_path, velocities_path, T_radar_dmu, scale_z, lidar_times)
         traj = traj @ T_radar_applanix
         traj = np.linalg.inv(T_radar_applanix) @ traj
-
-        
         
         writeOdom3DTrajectory(lidar_times, traj, os.path.join("output", sequence, "odometry_result/" + sequence + ".txt"))
 
@@ -71,9 +75,11 @@ def writeOdom3DTrajectory(timestamps, poses, output_path):
 
 
 
-def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale, times_output):
+def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_output, imu_bias_estimation=False, imu_bias_prior=None):
     imu_data = IMUData()
     imu_data.readFromBoreasFile(imu_path)
+    if imu_bias_prior is not None:
+        imu_data.setBias(imu_bias_prior)
 
     traj = []
 
@@ -81,12 +87,15 @@ def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale, times_outpu
     velocity_data = np.loadtxt(velocities_path, delimiter=',', skiprows=1)
 
 
-    odom3D = GyrBasedOdom3D(T_sensor_imu, scale)
+    odom3D = GyrBasedOdom3D(T_sensor_imu, bias_estimation=imu_bias_estimation)
 
     previous_time = velocity_data[0, 1] * 1e-6
     for i in range(len(velocity_data) - 1):
         end_time = velocity_data[i, 2] * 1e-6
         body_vel = velocity_data[i, 3:5]
+
+        vel_norm = np.linalg.norm(body_vel)
+        body_vel = np.array([body_vel[0], body_vel[1], scale_z * vel_norm])  # Add a z component to the velocity, which is the norm of the x-y velocity multiplied by the scale factor.
 
         if i == 17 or i == 18:
             pass
@@ -123,7 +132,71 @@ def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale, times_outpu
 
 
 def dro3DCalibration(data_root, velocities_root, sequences):
-    pass
+
+    # Check if the calibration folder exists, if not create it.
+    calib_folder = os.path.join("calib")
+    os.makedirs(calib_folder, exist_ok=True)
+
+    kTimeMargin = 0.005
+
+    gt_vels = []
+    radar_vels = []
+
+    for sequence in sequences:
+        velocity_data = np.loadtxt(os.path.join(velocities_root, sequence, "other_log/velocity.csv"), delimiter=',', skiprows=1)
+
+        dataset = pb.BoreasDataset(data_root, split=[[sequence]])
+        data_seq = dataset.sequences[0]
+
+        print("Number of radar scans: ", len(dataset.sequences[0].radar_frames), " for sequence ", sequence)
+
+        if len(data_seq.radar_frames) != len(velocity_data):
+            raise ValueError(f"Number of radar frames {len(data_seq.radar_frames)} does not match number of velocity data points {len(velocity_data)} for sequence {sequence}.")
+
+        for i in range(len(data_seq.radar_frames)):
+            radar_frame = data_seq.radar_frames[i]
+            gt_vel = radar_frame.body_rate[:3].flatten()  # Get the ground truth velocity from the radar frame.
+            gt_vels.append(gt_vel)
+
+            radar_vel = np.array([velocity_data[i, 3], velocity_data[i, 4], 0])  # Get the velocity from the velocity data and add a zero for the z-axis.
+            radar_vels.append(radar_vel)
+
+            if(np.abs(radar_frame.timestamp - velocity_data[i, 0]) > kTimeMargin):
+                raise ValueError(f"Timestamp of radar frame {radar_frame.timestamp} does not match timestamp of velocity data {velocity_data[i, 0]} for sequence {sequence}, frame {i + 1}.")
+            
+
+            radar_frame.unload_data()
+        
+
+
+    gt_vels = np.array(gt_vels)
+    radar_vels = np.array(radar_vels)
+
+    # Estimate a scale factor using the ratio of the x-y norms of the velocities.
+    radar_vels_xy_norm = np.linalg.norm(radar_vels[:, :2], axis=1)
+    gt_vels_z = gt_vels[:, 2]
+    mask = radar_vels_xy_norm > 1.0
+    z_scale = np.mean(gt_vels_z[mask] / radar_vels_xy_norm[mask])
+
+    save_path = os.path.join(calib_folder, "radar_vel_z_scale.txt")
+    np.savetxt(save_path, np.array([z_scale]))
+    print(f"Estimated z scale factor: {z_scale} saved to {save_path}")
+
+
+    # Plot for debugging
+    fig, axs = plt.subplots(3, 1, figsize=(10, 10))
+    axs[0].plot(gt_vels[:, 0], label='GT Vel X')
+    axs[0].plot(radar_vels[:, 0], label='Radar Vel X')
+    axs[0].legend()
+    axs[1].plot(gt_vels[:, 1], label='GT Vel Y')
+    axs[1].plot(radar_vels[:, 1], label='Radar Vel Y')
+    axs[1].legend()
+    axs[2].plot(gt_vels[:, 2], label='GT Vel Z')
+    axs[2].plot(radar_vels[:, 2], label='Radar Vel Z')
+    axs[2].plot(radar_vels_xy_norm * z_scale, label='Calibrated Radar Vel Z', color='red')
+    axs[2].legend()
+    plt.show()
+
     
 
 
@@ -132,6 +205,8 @@ class IMUData:
         self.timestamps = []
         self.angular_velocities = []
         self.linear_accelerations = []
+        self.bias_gyr = np.zeros(3)
+        self.bias_acc = np.zeros(3)
 
     def readFromBoreasFile(self, file_path):
         data = np.loadtxt(file_path, delimiter=',', skiprows=1)
@@ -154,7 +229,14 @@ class IMUData:
             if first_after_end is not None:
                 mask[first_after_end] = True
             mask |= (self.timestamps >= start_time) & (self.timestamps <= end_time)
-        return self.timestamps[mask], self.angular_velocities[mask,:], self.linear_accelerations[mask,:]
+        return self.timestamps[mask], self.angular_velocities[mask,:] - self.bias_gyr, self.linear_accelerations[mask,:] - self.bias_acc
+
+
+    def setBias(self, bias_gyr=None, bias_acc=None):
+        if bias_gyr is not None:
+            self.bias_gyr = bias_gyr
+        if bias_acc is not None:
+            self.bias_acc = bias_acc
 
 
 def interpolate(t0, t1, v0, v1, t):
@@ -165,7 +247,7 @@ def interpolate(t0, t1, v0, v1, t):
 
 
 class GyrBasedOdom3D:
-    def __init__(self, T_sensor_imu, scale, bias_estimation = False):
+    def __init__(self, T_sensor_imu, scale = 1.0, bias_estimation = False):
         self.T_sensor_imu = T_sensor_imu
         self.current_pose = np.eye(4)
         self.current_time = None
@@ -254,7 +336,7 @@ class GyrBasedOdom3D:
                     dt = time_output - t0
                     omega = (omega0 + omega_out) / 2
                     delta_R = R.from_rotvec(omega * dt).as_matrix()
-                    delta_pos = self.scale * body_vel * dt
+                    delta_pos = body_vel * dt
                     delta_T_out = np.eye(4)
                     delta_T_out[:3, :3] = delta_R
                     delta_T_out[:3, 3] = delta_pos
@@ -271,7 +353,7 @@ class GyrBasedOdom3D:
             dt = t1 - t0
             omega = (omega0 + omega1) / 2
             delta_R = R.from_rotvec(omega * dt).as_matrix()
-            delta_pos = self.scale * body_vel * dt
+            delta_pos = body_vel * dt
 
             delta_T = np.eye(4)
             delta_T[:3, :3] = delta_R
