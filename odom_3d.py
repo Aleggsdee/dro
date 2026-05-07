@@ -4,6 +4,7 @@ from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
 import pandas as pd
 import pyboreas as pb
+import boreas_eval as be
 
 from pyboreas.utils.odometry import (
     read_traj_file_gt
@@ -12,38 +13,48 @@ from pyboreas.utils.odometry import (
 
 
 def main():
-    data_root = "/media/ced/Extreme Pro/data/boreas/rss/test"
+    data_root = "/media/ced/ext_nvme/data/boreas_2"
     velocities_root = "output_2d"
     sequences = ['boreas-2024-12-03-12-54']
+    no_calib = False
+    no_3d = False
 
     dro3DCalibration(data_root, velocities_root, sequences)
 
 
-    sequences = ['boreas-2024-12-03-12-54',
-                 'boreas-2024-12-10-12-07']
-
-    for sequence in sequences:
-        data_path = os.path.join(data_root, sequence, "imu/dmu_imu.csv")
-        velocities_path = os.path.join(velocities_root, sequence, "other_log/velocity.csv")
-        T_applanix_dmu = np.loadtxt(os.path.join(data_root, sequence, "calib/T_applanix_dmu.txt"))
+    sequences = be.sequence_type.keys()
 
 
-        T_applanix_lidar = np.loadtxt(os.path.join(data_root, sequence, "calib/T_applanix_lidar.txt"))
-        T_radar_lidar = np.loadtxt(os.path.join(data_root, sequence, "calib/T_radar_lidar.txt"))
-        T_radar_dmu = T_radar_lidar @ np.linalg.inv(T_applanix_lidar) @ T_applanix_dmu
-        T_radar_applanix = T_radar_lidar @ np.linalg.inv(T_applanix_lidar)
-
-        # Read the lidar times for the output (needed as the evaluation is done in the lidar frame).
-        _, lidar_times = readGTLidarBoreas(os.path.join(data_root, sequence, "applanix/lidar_poses.csv"))
-
-        scale_z = np.loadtxt(os.path.join("calib", "radar_vel_z_scale.txt"))
+    for i, sequence in enumerate(sequences):
+        print(f"Processing sequence {sequence} ({i + 1}/{len(sequences)})...")
+        try:
+            data_path = os.path.join(data_root, sequence, "imu/dmu_imu.csv")
+            velocities_path = os.path.join(velocities_root, sequence, "other_log/velocity.csv")
+            T_applanix_dmu = np.loadtxt(os.path.join(data_root, sequence, "calib/T_applanix_dmu.txt"))
 
 
-        traj = droOdom3DOffline(data_path, velocities_path, T_radar_dmu, scale_z, lidar_times)
-        traj = traj @ T_radar_applanix
-        traj = np.linalg.inv(T_radar_applanix) @ traj
-        
-        writeOdom3DTrajectory(lidar_times, traj, os.path.join("output", sequence, "odometry_result/" + sequence + ".txt"))
+            T_applanix_lidar = np.loadtxt(os.path.join(data_root, sequence, "calib/T_applanix_lidar.txt"))
+            T_radar_lidar = np.loadtxt(os.path.join(data_root, sequence, "calib/T_radar_lidar.txt"))
+            T_radar_dmu = T_radar_lidar @ np.linalg.inv(T_applanix_lidar) @ T_applanix_dmu
+            T_radar_applanix = T_radar_lidar @ np.linalg.inv(T_applanix_lidar)
+
+            # Read the lidar times for the output (needed as the evaluation is done in the lidar frame).
+            _, lidar_times = readGTLidarBoreas(os.path.join(data_root, sequence, "applanix/lidar_poses.csv"))
+
+            if no_calib:
+                scale_z = 0.0
+            else:
+                scale_z = np.loadtxt(os.path.join("calib", "radar_vel_z_scale.txt"))
+
+
+            traj = droOdom3DOffline(data_path, velocities_path, T_radar_dmu, scale_z, lidar_times, yaw_only=no_3d)
+            traj = traj @ T_radar_applanix
+            traj = np.linalg.inv(T_radar_applanix) @ traj
+            
+            writeOdom3DTrajectory(lidar_times, traj, os.path.join("output", sequence, "odometry_result/" + sequence + ".txt"))
+        except:
+            print(f"Error processing sequence {sequence}. Skipping.")
+            continue
 
 
 
@@ -75,7 +86,7 @@ def writeOdom3DTrajectory(timestamps, poses, output_path):
 
 
 
-def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_output, imu_bias_estimation=False, imu_bias_prior=None):
+def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_output, imu_bias_estimation=False, imu_bias_prior=None, yaw_only=False):
     imu_data = IMUData()
     imu_data.readFromBoreasFile(imu_path)
     if imu_bias_prior is not None:
@@ -94,11 +105,12 @@ def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_out
         end_time = velocity_data[i, 2] * 1e-6
         body_vel = velocity_data[i, 3:5]
 
-        vel_norm = np.linalg.norm(body_vel)
-        body_vel = np.array([body_vel[0], body_vel[1], scale_z * vel_norm])  # Add a z component to the velocity, which is the norm of the x-y velocity multiplied by the scale factor.
+        if yaw_only:
+            body_vel = np.array([body_vel[0], body_vel[1], 0.0])
+        else:
+            vel_norm = np.linalg.norm(body_vel)
+            body_vel = np.array([body_vel[0], body_vel[1], scale_z * vel_norm])  # Add a z component to the velocity, which is the norm of the x-y velocity multiplied by the scale factor.
 
-        if i == 17 or i == 18:
-            pass
         mask = (times_output > previous_time) & (times_output <= end_time)
         temp_time_output = times_output[mask]
 
@@ -110,8 +122,9 @@ def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_out
 
 
         gyr_timestamps, gyr_data, _ = imu_data.getInInterval(previous_time, end_time)
-        if i == 22:
-            pass
+        if yaw_only:
+            gyr_data[:, 0] = 0.0
+            gyr_data[:, 1] = 0.0
         poses = odom3D.updateWithVel(gyr_timestamps, gyr_data, body_vel, end_time, temp_time_output)
         if len(poses) != len(temp_time_output):
             raise ValueError(f"Number of output poses {len(poses)} does not match number of output times {len(temp_time_output)}.")
@@ -184,17 +197,23 @@ def dro3DCalibration(data_root, velocities_root, sequences):
 
 
     # Plot for debugging
-    fig, axs = plt.subplots(3, 1, figsize=(10, 10))
-    axs[0].plot(gt_vels[:, 0], label='GT Vel X')
-    axs[0].plot(radar_vels[:, 0], label='Radar Vel X')
+    fig_width = 10
+    fig, axs = plt.subplots(3, 1, figsize=(fig_width, 10))
+    axs[0].plot(gt_vels[:, 0], label='GT vel. x')
+    axs[0].plot(radar_vels[:, 0], label='Radar vel. x (RMSE: ' + str(round(np.sqrt(np.mean((gt_vels[:, 0] - radar_vels[:, 0]) ** 2)), 2)) + ')')
     axs[0].legend()
-    axs[1].plot(gt_vels[:, 1], label='GT Vel Y')
-    axs[1].plot(radar_vels[:, 1], label='Radar Vel Y')
+    axs[1].plot(gt_vels[:, 1], label='GT vel. y')
+    axs[1].plot(radar_vels[:, 1], label='Radar vel. y (RMSE: ' + str(round(np.sqrt(np.mean((gt_vels[:, 1] - radar_vels[:, 1]) ** 2)), 2)) + ')')
     axs[1].legend()
-    axs[2].plot(gt_vels[:, 2], label='GT Vel Z')
-    axs[2].plot(radar_vels[:, 2], label='Radar Vel Z')
-    axs[2].plot(radar_vels_xy_norm * z_scale, label='Calibrated Radar Vel Z', color='red')
-    axs[2].legend()
+    axs[2].plot(gt_vels[:, 2], label='GT vel. z')
+    axs[2].plot(radar_vels_xy_norm * z_scale, label='Radar vel. z approx (mean error: ' + str(round(np.mean((gt_vels[:, 2] - radar_vels_xy_norm * z_scale)), 3)) + ', RMSE: ' + str(round(np.sqrt(np.mean((gt_vels[:, 2] - radar_vels_xy_norm * z_scale) ** 2)), 3)) + ')')
+    axs[2].plot(radar_vels[:, 2], label='No vel. z (mean error: ' + str(round(np.mean((gt_vels[:, 2])), 3)) + ', RMSE: ' + str(round(np.sqrt(np.mean((gt_vels[:, 2]) ** 2)), 3)) + ')')
+    axs[2].set_xlabel('Frame index of calibration sequence')
+    axs[2].set_ylabel('Velocity z [m/s]')
+    # Show legend with opaque background
+    axs[2].legend(loc='upper left', framealpha=1)
+    axs[2].set_ylim(-0.2,0.5)
+    plt.tight_layout()
     plt.show()
 
     

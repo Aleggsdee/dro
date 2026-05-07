@@ -4,6 +4,9 @@ This repository contains the code associated with our RSS 2025 paper __"DRO: Dop
 
 Authors: Cedric Le Gentil, Leonardo Brizi, Daniil Lisus, Xinyuan Qiao, Giorgio Grisetti, Timothy D. Barfoot.
 
+**EDIT:** Now this code also contains the implementation of the 3D odometry approach described in the paper __"3DRO: Lidar-level SE(3) Odometry Using a 2D Imaging Radar and a Gyroscope"__ accessible [here](https://arxiv.org/abs/2604.12027).
+
+
 #### Paper abstract
 _Compared to cameras or lidars, millimetre-wave radars have the ability to ‘see’ through thin walls, vegetation, and adversarial weather conditions such as heavy rain, fog, snow, and dust.
 In this paper, we propose a novel SE(2) odometry approach for spinning frequency-modulated continuous-wave radars.
@@ -62,21 +65,43 @@ __Note that the visualisation is enabled by default.
 However, this slows down the processing significantly.
 You can disable it by setting `display` to `False` in the configuration file.__
 
+## Run 3DRO
+
+The script `odom_3d.py` allows to run the 3D odometry approach described in our ICRA 2026 workshop paper.
+You will need to first run the 2D odometry to compute the estimated in-plane velocities.
+Then, you can run the 3D odometry with the following command (make sure to change the path to 2D results in the script):
+```python
+python odom_3d.py
+```
+
 ## Run evaluation
 
 The script `boreas_eval.py` allows to run the evaluation with the KITTI metric.
 You will need to change the path to the Boreas dataset within the script.
+You will also need to specify if you want to evaluate the 2D or 3D odometry (`dim` variable in the script).
+
 
 __WARNING:__ This code might yield slightly different results than in the RSS paper, as it has been refactored for release (some parameters were hard-coded and are now available in the configuration files).
 
 ## Citation
 If you find this code useful, please consider citing our paper:
 
+**DRO**
 ```bibtex
 @inproceedings{legentil2025dro,
   title={DRO: Doppler-Aware Direct Radar Odometry},
   author={Le Gentil, Cedric and Brizi, Leonardo and Lisus, Daniil and Qiao, Xinyuan and Grisetti, Giorgio and Barfoot, Timothy D.},
   booktitle={Robotics: Science and Systems},
   year={2025},
+}
+```
+
+**3DRO**
+```bibtex
+@inproceedings{legentil20263dro,
+  title={3DRO: Lidar-level SE(3) Odometry Using a 2D Imaging Radar and a Gyroscope},
+  author={Le Gentil, Cedric and Lisus, Daniil and Barfoot, Timothy D.},
+  booktitle={ICRA Workshop Radar in Robotics},
+  year={2026},
 }
 ```
