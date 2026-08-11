@@ -1,10 +1,10 @@
+import argparse
 import numpy as np
 import os
 from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
 import pandas as pd
 import pyboreas as pb
-import boreas_eval as be
 
 from pyboreas.utils.odometry import (
     read_traj_file_gt
@@ -13,16 +13,25 @@ from pyboreas.utils.odometry import (
 
 
 def main():
-    data_root = "/media/asrl/Extreme SSD/ASRL/boreas/data"
-    velocities_root = "output_2d"
-    sequences = ['boreas-2024-12-03-12-54']
-    no_calib = False
-    no_3d = False
+    parser = argparse.ArgumentParser(description="Generate 3DRO radar odometry.")
+    parser.add_argument("--sequence", action="append", required=True)
+    parser.add_argument("--data-root", default=os.getenv("VTRRDATA"))
+    parser.add_argument("--velocities-root", default="output_2d")
+    parser.add_argument("--output-root", default="output")
+    parser.add_argument("--no-calib", action="store_true")
+    parser.add_argument("--yaw-only", action="store_true")
+    args = parser.parse_args()
+    if args.data_root is None:
+        parser.error("--data-root is required when VTRRDATA is not set")
 
-    dro3DCalibration(data_root, velocities_root, sequences)
+    data_root = args.data_root
+    velocities_root = args.velocities_root
+    sequences = args.sequence
+    no_calib = args.no_calib
+    no_3d = args.yaw_only
 
-
-    sequences = be.sequence_type.keys()
+    if not no_calib:
+        dro3DCalibration(data_root, velocities_root, sequences)
 
 
     for i, sequence in enumerate(sequences):
@@ -82,7 +91,7 @@ def main():
             # traj = traj @ T_radar_applanix # T_radar(0)_applanix(t)
             # traj = np.linalg.inv(T_radar_applanix) @ traj # T_applanix(0)_applanix(t)
             
-            output_dir = os.path.join("output", sequence, "odometry_result")
+            output_dir = os.path.join(args.output_root, sequence, "odometry_result")
             writeOdom3DTrajectory(
                 radar_times,
                 np.linalg.inv(reference_poses),
