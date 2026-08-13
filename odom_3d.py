@@ -183,8 +183,8 @@ def readFrameVelocities(path, frame_times_us, azimuth_times_us, frame_offsets):
         raise ValueError("2DRO velocity and radar scan start timestamps differ.")
     if not np.array_equal(velocity_end_us, expected_end_us):
         raise ValueError("2DRO velocity and radar scan end timestamps differ.")
-    # All supported runs begin stationary; use the first scan as the odometry anchor.
-    data[0, 3:5] = 0.0
+    # All supported runs begin and end stationary; use those scans as odometry anchors.
+    data[[0, -1], 3:5] = 0.0
     return data[:, 3:5], velocity_start_us, velocity_end_us
 
 
@@ -215,6 +215,9 @@ def writeAzimuthOdometry(
     first_start, first_end = frame_offsets[:2]
     if not np.allclose(odom_transforms[first_start:first_end], np.eye(4), atol=1e-8):
         raise ValueError("Stationary first-frame azimuth transforms are not identity.")
+    last_start, last_end = frame_offsets[-2:]
+    if not np.allclose(odom_transforms[last_start:last_end], np.eye(4), atol=1e-8):
+        raise ValueError("Stationary final-frame azimuth transforms are not identity.")
 
     frame_transforms = np.empty_like(reference_poses)
     frame_transforms[0] = np.eye(4)
@@ -263,7 +266,7 @@ def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_out
     first_index = np.searchsorted(times_output, previous_time, side="right")
     traj.extend(np.eye(4) for _ in range(first_index))
     odom3D.current_time = previous_time
-    for i in range(1, len(velocity_data)):
+    for i in range(1, len(velocity_data) - 1):
         end_time = velocity_data[i, 2] * 1e-6
         body_vel = velocity_data[i, 3:5]
 
@@ -290,6 +293,9 @@ def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_out
         previous_time = end_time
 
         print(f"Processed velocity data point {i + 1}/{len(velocity_data)}", end='    \r')
+
+    # The final scan is also stationary and may end after the IMU stream.
+    traj.extend(odom3D.current_pose.copy() for _ in range(len(times_output) - len(traj)))
 
     if len(traj) != len(times_output):
         raise ValueError(
