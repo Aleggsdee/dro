@@ -183,6 +183,8 @@ def readFrameVelocities(path, frame_times_us, azimuth_times_us, frame_offsets):
         raise ValueError("2DRO velocity and radar scan start timestamps differ.")
     if not np.array_equal(velocity_end_us, expected_end_us):
         raise ValueError("2DRO velocity and radar scan end timestamps differ.")
+    # All supported runs begin stationary; use the first scan as the odometry anchor.
+    data[0, 3:5] = 0.0
     return data[:, 3:5], velocity_start_us, velocity_end_us
 
 
@@ -209,6 +211,10 @@ def writeAzimuthOdometry(
         if not np.allclose(reference_poses[frame_idx] @ transforms, azimuth_poses, atol=1e-8):
             raise ValueError(f"Invalid azimuth transform composition for frame {frame_idx}.")
         odom_transforms[start:end] = transforms
+
+    first_start, first_end = frame_offsets[:2]
+    if not np.allclose(odom_transforms[first_start:first_end], np.eye(4), atol=1e-8):
+        raise ValueError("Stationary first-frame azimuth transforms are not identity.")
 
     frame_transforms = np.empty_like(reference_poses)
     frame_transforms[0] = np.eye(4)
@@ -252,10 +258,12 @@ def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_out
 
     odom3D = GyrBasedOdom3D(T_sensor_imu, bias_estimation=imu_bias_estimation)
 
-    previous_time = velocity_data[0, 1] * 1e-6
+    # The vehicle is stationary during the first scan, which may begin before the IMU stream.
+    previous_time = velocity_data[0, 2] * 1e-6
     first_index = np.searchsorted(times_output, previous_time, side="right")
     traj.extend(np.eye(4) for _ in range(first_index))
-    for i in range(len(velocity_data)):
+    odom3D.current_time = previous_time
+    for i in range(1, len(velocity_data)):
         end_time = velocity_data[i, 2] * 1e-6
         body_vel = velocity_data[i, 3:5]
 
