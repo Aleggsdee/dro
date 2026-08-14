@@ -1,22 +1,21 @@
+import argparse
 import numpy as np
 import os
 import os.path as osp
-import sys
 from itertools import accumulate
 from time import time
 
 from pyboreas.utils.odometry import (
     get_sequence_poses,
-    get_sequence_poses_gt,
     get_sequences,
     calc_sequence_errors,
     get_stats,
     get_stats_per_frame,
     plot_stats,
+    read_traj_file_gt,
 )
 
 default_result_path = './output'
-gt_path = '/media/ced/ext_nvme/data/boreas_2'
 dim = 3
 
 # New sequences
@@ -96,7 +95,7 @@ sequence_type = {
 }
 
 
-def main(result_path=default_result_path):
+def main(result_path, data_root):
     # Get the list of folders in the result path
     folders = [f for f in os.listdir(result_path) if osp.isdir(osp.join(result_path, f))]
     folders = sorted(folders)
@@ -109,9 +108,9 @@ def main(result_path=default_result_path):
         print('Processing folder: ', folder)
 
         try:
-            t_err, r_err, t_err_2d, r_err_2d = eval_odom(osp.join(result_path, folder, 'odometry_result'), gt_path, dim)
-        except:
-            print('Error in sequence: ', folder)
+            t_err, r_err, t_err_2d, r_err_2d = eval_odom(osp.join(result_path, folder, 'odometry_result'), data_root, dim)
+        except Exception as e:
+            print(f'Error in sequence {folder}: {e}')
             continue
 
         print('Mean translation error: ', t_err)
@@ -173,7 +172,7 @@ def compute_kitti_metrics(
     """
     # set step size
     if dim == 3:
-        step_size = 10  # every 10 frames should be 1 second
+        step_size = 4  # radar frames are approximately 4 Hz
     elif dim == 2:
         step_size = 4  # every 4 frames should be 1 second
     else:
@@ -249,7 +248,20 @@ def compute_kitti_metrics(
 
 
 
-# Copy paste from pyboreas
+def get_radar_sequence_poses_gt(path, seq):
+    all_poses, all_times, seq_lens, crop = [], [], [], []
+    for filename in seq:
+        sequence = filename[:-4]
+        poses, times = read_traj_file_gt(
+            osp.join(path, sequence, "applanix/radar_poses.csv"), np.eye(4), dim=3
+        )
+        all_poses.extend(poses)
+        all_times.extend(times)
+        seq_lens.append(len(times))
+        crop.append((0, len(times)))
+    return all_poses, all_times, seq_lens, crop
+
+
 def eval_odom(pred="test/demo/pred/3d", gt="test/demo/gt", dim=2):
     # evaluation mode
 
@@ -258,7 +270,9 @@ def eval_odom(pred="test/demo/pred/3d", gt="test/demo/gt", dim=2):
     T_pred, times_pred, seq_lens_pred = get_sequence_poses(pred, seq)
 
     # get corresponding groundtruth poses
-    T_gt, _, seq_lens_gt, crop = get_sequence_poses_gt(gt, seq, dim)
+    T_gt, times_gt, seq_lens_gt, crop = get_radar_sequence_poses_gt(gt, seq)
+    if times_pred != times_gt:
+        raise ValueError("Prediction and radar ground-truth timestamps differ.")
 
     # compute errors
     t_err, r_err, _, t_err_2d, r_err_2d = compute_kitti_metrics(
@@ -277,8 +291,10 @@ def eval_odom(pred="test/demo/pred/3d", gt="test/demo/gt", dim=2):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        result_path = sys.argv[1]
-    else:
-        result_path = default_result_path
-    main(result_path)
+    parser = argparse.ArgumentParser(description="Evaluate radar-rate 3DRO trajectories.")
+    parser.add_argument("result_path", nargs="?", default=default_result_path)
+    parser.add_argument("--data-root", default=os.getenv("VTRRDATA"))
+    args = parser.parse_args()
+    if args.data_root is None:
+        parser.error("--data-root is required when VTRRDATA is not set")
+    main(args.result_path, args.data_root)
