@@ -17,7 +17,9 @@ def main():
 
     # Load the data with pyboreas
     if config['data']['multi_sequence']:
-        db = pb.BoreasDataset(config['data']['data_path'])
+        sequence_ids = config['data'].get("sequences")
+        split = [[sequence_id] for sequence_id in sequence_ids] if sequence_ids else None
+        db = pb.BoreasDataset(config['data']['data_path'], split=split)
         sequences = db.sequences
     else:
         path = config['data']['data_path']
