@@ -1,10 +1,12 @@
+import argparse
 import numpy as np
 import os
 from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
 import pandas as pd
 import pyboreas as pb
-import boreas_eval as be
+
+from azimuth_odometry import writeAzimuthOdometryArrays
 
 from pyboreas.utils.odometry import (
     read_traj_file_gt
@@ -13,16 +15,25 @@ from pyboreas.utils.odometry import (
 
 
 def main():
-    data_root = "/media/ced/ext_nvme/data/boreas_2"
-    velocities_root = "output_2d"
-    sequences = ['boreas-2024-12-03-12-54']
-    no_calib = False
-    no_3d = False
+    parser = argparse.ArgumentParser(description="Generate 3DRO radar odometry.")
+    parser.add_argument("--sequence", action="append", required=True)
+    parser.add_argument("--data-root", default=os.getenv("VTRRDATA"))
+    parser.add_argument("--velocities-root", default="output_2d")
+    parser.add_argument("--output-root", default="output")
+    parser.add_argument("--no-calib", action="store_true")
+    parser.add_argument("--yaw-only", action="store_true")
+    args = parser.parse_args()
+    if args.data_root is None:
+        parser.error("--data-root is required when VTRRDATA is not set")
 
-    dro3DCalibration(data_root, velocities_root, sequences)
+    data_root = args.data_root
+    velocities_root = args.velocities_root
+    sequences = args.sequence
+    no_calib = args.no_calib
+    no_3d = args.yaw_only
 
-
-    sequences = be.sequence_type.keys()
+    if not no_calib:
+        dro3DCalibration(data_root, velocities_root, sequences)
 
 
     for i, sequence in enumerate(sequences):
@@ -39,7 +50,26 @@ def main():
             T_radar_applanix = T_radar_lidar @ np.linalg.inv(T_applanix_lidar)
 
             # Read the lidar times for the output (needed as the evaluation is done in the lidar frame).
-            _, lidar_times = readGTLidarBoreas(os.path.join(data_root, sequence, "applanix/lidar_poses.csv"))
+            # _, lidar_times = readGTLidarBoreas(os.path.join(data_root, sequence, "applanix/lidar_poses.csv"))
+            _, radar_times = readGTLidarBoreas(os.path.join(data_root, sequence, "applanix/radar_poses.csv"))
+
+            # anchor the first radar pose in enu
+            dataset = pb.BoreasDataset(data_root, split=[[sequence]])
+            data_seq = dataset.sequences[0]
+            first_radar_frame = data_seq.radar_frames[0]
+            T_enu_radar0 = first_radar_frame.pose
+
+            frame_times_us, azimuth_times_us, frame_offsets = readRadarTimestamps(data_seq)
+            frame_body_velocities, velocity_start_us, velocity_end_us = readFrameVelocities(
+                velocities_path,
+                frame_times_us,
+                azimuth_times_us,
+                frame_offsets,
+            )
+            radar_times_us = np.rint(radar_times * 1e6).astype(np.int64)
+            if not np.array_equal(frame_times_us, radar_times_us):
+                raise ValueError("Dataset and radar ground-truth timestamps differ.")
+            query_times_us = np.unique(np.concatenate((frame_times_us, azimuth_times_us)))
 
             if no_calib:
                 scale_z = 0.0
@@ -47,13 +77,43 @@ def main():
                 scale_z = np.loadtxt(os.path.join("calib", "radar_vel_z_scale.txt"))
 
 
-            traj = droOdom3DOffline(data_path, velocities_path, T_radar_dmu, scale_z, lidar_times, yaw_only=no_3d)
-            traj = traj @ T_radar_applanix
-            traj = np.linalg.inv(T_radar_applanix) @ traj
+            traj = droOdom3DOffline(
+                data_path,
+                velocities_path,
+                T_radar_dmu,
+                scale_z,
+                query_times_us * 1e-6,
+                yaw_only=no_3d,
+            )  # T_radar(0)_radar(t)
+            frame_indices = np.searchsorted(query_times_us, frame_times_us)
+            anchor = T_enu_radar0 @ np.linalg.inv(traj[frame_indices[0]])
+            reference_poses = np.linalg.inv(anchor @ traj[frame_indices])  # T_radar(t)_enu
+            assert np.allclose(reference_poses[0], np.linalg.inv(T_enu_radar0), rtol=0, atol=1e-8)
+
+            # traj = traj @ T_radar_applanix # T_radar(0)_applanix(t)
+            # traj = np.linalg.inv(T_radar_applanix) @ traj # T_applanix(0)_applanix(t)
             
-            writeOdom3DTrajectory(lidar_times, traj, os.path.join("output", sequence, "odometry_result/" + sequence + ".txt"))
-        except:
-            print(f"Error processing sequence {sequence}. Skipping.")
+            output_dir = os.path.join(args.output_root, sequence, "odometry_result")
+            writeOdom3DTrajectory(
+                radar_times,
+                np.linalg.inv(reference_poses),
+                os.path.join(output_dir, sequence + ".txt"),
+            )
+            writeAzimuthOdometry(
+                os.path.join(output_dir, "azimuth_odometry.npz"),
+                query_times_us,
+                traj,
+                anchor,
+                frame_times_us,
+                reference_poses,
+                azimuth_times_us,
+                frame_offsets,
+                frame_body_velocities,
+                velocity_start_us,
+                velocity_end_us,
+            )
+        except Exception as e:
+            print(f"Error processing sequence {sequence}: {e}. Skipping.")
             continue
 
 
@@ -69,7 +129,7 @@ def readGTLidarBoreas(gt_traj_path):
 def writeOdom3DTrajectory(timestamps, poses, output_path):
     to_write = []
     for i in range(len(timestamps)):
-        timestamp = timestamps[i] * 1e6  # Convert from microseconds to seconds
+        timestamp = round(timestamps[i] * 1e6)  # Convert seconds to microseconds
         pose = poses[i]
         pose_flat = np.linalg.inv(pose)[:3,:].flatten()
         to_write.append([timestamp] + pose_flat.tolist())
@@ -83,10 +143,108 @@ def writeOdom3DTrajectory(timestamps, poses, output_path):
     to_write_pd.to_csv(output_path, index=False, header=False, sep=' ')
 
 
+def readRadarTimestamps(sequence):
+    frame_times = []
+    azimuth_times = []
+    frame_offsets = [0]
+    for radar_frame in sequence.radar_frames:
+        radar_frame.load_data()
+        times = radar_frame.timestamps.flatten().astype(np.int64)
+        if len(times) == 0:
+            raise ValueError(f"Invalid azimuth timestamps for radar frame {radar_frame.frame}.")
+        frame_times.append(radar_frame.timestamp_micro)
+        azimuth_times.extend(times)
+        frame_offsets.append(len(azimuth_times))
+        radar_frame.unload_data()
+    return (
+        np.asarray(frame_times, dtype=np.int64),
+        np.asarray(azimuth_times, dtype=np.int64),
+        np.asarray(frame_offsets, dtype=np.int64),
+    )
 
+
+def readFrameVelocities(path, frame_times_us, azimuth_times_us, frame_offsets):
+    data = np.atleast_2d(np.loadtxt(path, delimiter=",", skiprows=1))
+    if data.shape != (len(frame_times_us), 5) or not np.isfinite(data).all():
+        raise ValueError(f"Invalid 2DRO velocity data shape or values: {data.shape}.")
+
+    velocity_frame_times_us = np.rint(data[:, 0] * 1e6).astype(np.int64)
+    velocity_start_us = data[:, 1].astype(np.int64)
+    velocity_end_us = data[:, 2].astype(np.int64)
+    expected_start_us = np.asarray(
+        [np.min(azimuth_times_us[start:end]) for start, end in zip(frame_offsets[:-1], frame_offsets[1:])],
+        dtype=np.int64,
+    )
+    expected_end_us = np.asarray(
+        [np.max(azimuth_times_us[start:end]) for start, end in zip(frame_offsets[:-1], frame_offsets[1:])],
+        dtype=np.int64,
+    )
+    if not np.array_equal(velocity_frame_times_us, frame_times_us):
+        raise ValueError("2DRO velocity and radar reference timestamps differ.")
+    if not np.array_equal(velocity_start_us, expected_start_us):
+        raise ValueError("2DRO velocity and radar scan start timestamps differ.")
+    if not np.array_equal(velocity_end_us, expected_end_us):
+        raise ValueError("2DRO velocity and radar scan end timestamps differ.")
+    # All supported runs begin and end stationary; use those scans as odometry anchors.
+    data[[0, -1], 3:5] = 0.0
+    return data[:, 3:5], velocity_start_us, velocity_end_us
+
+
+def writeAzimuthOdometry(
+    output_path,
+    query_times_us,
+    traj,
+    anchor,
+    frame_times_us,
+    reference_poses,
+    azimuth_times_us,
+    frame_offsets,
+    frame_body_velocities,
+    velocity_start_us,
+    velocity_end_us,
+):
+    azimuth_indices = np.searchsorted(query_times_us, azimuth_times_us)
+    odom_transforms = np.empty((len(azimuth_times_us), 4, 4), dtype=np.float32)
+    for frame_idx in range(len(frame_times_us)):
+        start, end = frame_offsets[frame_idx:frame_idx + 2]
+        azimuth_poses = np.linalg.inv(anchor @ traj[azimuth_indices[start:end]])
+        # Match pipeline_dfo: P(azimuth) = P(frame reference) @ transform.
+        transforms = np.linalg.inv(reference_poses[frame_idx]) @ azimuth_poses
+        if not np.allclose(reference_poses[frame_idx] @ transforms, azimuth_poses, atol=1e-8):
+            raise ValueError(f"Invalid azimuth transform composition for frame {frame_idx}.")
+        odom_transforms[start:end] = transforms
+
+    first_start, first_end = frame_offsets[:2]
+    if not np.allclose(odom_transforms[first_start:first_end], np.eye(4), atol=1e-8):
+        raise ValueError("Stationary first-frame azimuth transforms are not identity.")
+    last_start, last_end = frame_offsets[-2:]
+    if not np.allclose(odom_transforms[last_start:last_end], np.eye(4), atol=1e-8):
+        raise ValueError("Stationary final-frame azimuth transforms are not identity.")
+
+    frame_transforms = np.empty_like(reference_poses)
+    frame_transforms[0] = np.eye(4)
+    frame_transforms[1:] = reference_poses[1:] @ np.linalg.inv(reference_poses[:-1])
+    if not np.allclose(frame_transforms[1:] @ reference_poses[:-1], reference_poses[1:], atol=1e-8):
+        raise ValueError("Invalid inter-frame transform composition.")
+
+    writeAzimuthOdometryArrays(
+        output_path,
+        frame_times_us,
+        reference_poses,
+        azimuth_times_us,
+        frame_offsets,
+        odom_transforms,
+        frame_transforms,
+        frame_body_velocities,
+        velocity_start_us,
+        velocity_end_us,
+    )
 
 
 def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_output, imu_bias_estimation=False, imu_bias_prior=None, yaw_only=False):
+    times_output = np.asarray(times_output, dtype=np.float64)
+    if np.any(np.diff(times_output) <= 0):
+        raise ValueError("Output timestamps must be strictly increasing.")
     imu_data = IMUData()
     imu_data.readFromBoreasFile(imu_path)
     if imu_bias_prior is not None:
@@ -100,8 +258,12 @@ def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_out
 
     odom3D = GyrBasedOdom3D(T_sensor_imu, bias_estimation=imu_bias_estimation)
 
-    previous_time = velocity_data[0, 1] * 1e-6
-    for i in range(len(velocity_data) - 1):
+    # The vehicle is stationary during the first scan, which may begin before the IMU stream.
+    previous_time = velocity_data[0, 2] * 1e-6
+    first_index = np.searchsorted(times_output, previous_time, side="right")
+    traj.extend(np.eye(4) for _ in range(first_index))
+    odom3D.current_time = previous_time
+    for i in range(1, len(velocity_data) - 1):
         end_time = velocity_data[i, 2] * 1e-6
         body_vel = velocity_data[i, 3:5]
 
@@ -111,14 +273,9 @@ def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_out
             vel_norm = np.linalg.norm(body_vel)
             body_vel = np.array([body_vel[0], body_vel[1], scale_z * vel_norm])  # Add a z component to the velocity, which is the norm of the x-y velocity multiplied by the scale factor.
 
-        mask = (times_output > previous_time) & (times_output <= end_time)
-        temp_time_output = times_output[mask]
-
-        if i == 0:
-            first_index = np.where(mask)[0][0] if np.any(mask) else None
-            if first_index is not None and first_index > 0:
-                for j in range(first_index):
-                    traj.append(np.eye(4))  # Append identity poses for the time outputs before the first velocity data point.
+        start = np.searchsorted(times_output, previous_time, side="right")
+        end = np.searchsorted(times_output, end_time, side="right")
+        temp_time_output = times_output[start:end]
 
 
         gyr_timestamps, gyr_data, _ = imu_data.getInInterval(previous_time, end_time)
@@ -132,12 +289,17 @@ def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_out
             traj.append(poses[j])
         previous_time = end_time
 
-        print(f"Processed velocity data point {i + 1}/{len(velocity_data) - 1}", end='    \r')
+        print(f"Processed velocity data point {i + 1}/{len(velocity_data)}", end='    \r')
+
+    # The final scan is also stationary and may end after the IMU stream.
+    traj.extend(odom3D.current_pose.copy() for _ in range(len(times_output) - len(traj)))
 
     if len(traj) != len(times_output):
-        print(f"Warning: Number of output poses {len(traj)} does not match number of output times {len(times_output)}. Duplicating the last pose for the remaining time outputs.")
-        for j in range(len(times_output) - len(traj)):
-            traj.append(traj[-1])  # Append the last pose for the remaining time outputs.
+        raise ValueError(
+            f"Number of output poses {len(traj)} does not match number of output times "
+            f"{len(times_output)}. Last output time: {times_output[-1]}, last velocity "
+            f"end time: {velocity_data[-1, 2] * 1e-6}."
+        )
 
 
     traj = np.array(traj)
@@ -335,7 +497,7 @@ class GyrBasedOdom3D:
         full_gyr_data.append(gyr_sensor[:, -1])
 
 
-        output_done = np.zeros(len(times_output), dtype=bool)
+        output_idx = 0
         gyr_id = 1
         while gyr_id < len(full_gyr_timestamps) and full_gyr_timestamps[gyr_id] < self.current_time:
             gyr_id += 1
@@ -349,8 +511,9 @@ class GyrBasedOdom3D:
                 omega0 = interpolate(t0, t1, omega0, omega1, self.current_time)
                 t0 = self.current_time
 
-            for i, time_output in enumerate(times_output):
-                if not output_done[i] and (t0 <= time_output) and (time_output <= t1):
+            while output_idx < len(times_output) and times_output[output_idx] <= t1:
+                time_output = times_output[output_idx]
+                if t0 <= time_output:
                     omega_out = interpolate(t0, t1, omega0, omega1, time_output)
                     dt = time_output - t0
                     omega = (omega0 + omega_out) / 2
@@ -360,7 +523,7 @@ class GyrBasedOdom3D:
                     delta_T_out[:3, :3] = delta_R
                     delta_T_out[:3, 3] = delta_pos
                     output_poses.append(self.current_pose @ delta_T_out)
-                    output_done[i] = True
+                output_idx += 1
 
 
             if t1 > end_time:

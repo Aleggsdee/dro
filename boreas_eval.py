@@ -1,18 +1,18 @@
+import argparse
 import numpy as np
 import os
 import os.path as osp
-import sys
 from itertools import accumulate
 from time import time
 
 from pyboreas.utils.odometry import (
     get_sequence_poses,
-    get_sequence_poses_gt,
     get_sequences,
     calc_sequence_errors,
     get_stats,
     get_stats_per_frame,
     plot_stats,
+    read_traj_file_gt,
 )
 
 default_result_path = './output'
@@ -24,21 +24,21 @@ sequence_type = {
         "boreas-2024-12-03-12-54" : "Suburbs",
         "boreas-2024-12-03-13-13" : "Regional",
         "boreas-2024-12-03-13-34" : "Regional",
-        "boreas-2024-12-04-11-45" : "Skyway",
-        "boreas-2024-12-04-11-56" : "Skyway",
-        "boreas-2024-12-04-12-08" : "Skyway",
-        "boreas-2024-12-04-12-19" : "Skyway",
-        "boreas-2024-12-04-12-34" : "Skyway",
-        "boreas-2024-12-04-14-28" : "Tunnel",
-        "boreas-2024-12-04-14-34" : "Tunnel",
-        "boreas-2024-12-04-14-38" : "Tunnel",
-        "boreas-2024-12-04-14-44" : "Tunnel",
-        "boreas-2024-12-04-14-50" : "Tunnel",
-        "boreas-2024-12-04-14-59" : "Tunnel",
-        "boreas-2024-12-04-15-04" : "Tunnel",
-        "boreas-2024-12-04-15-10" : "Tunnel",
-        "boreas-2024-12-04-15-19" : "Tunnel",
-        "boreas-2024-12-04-15-24" : "Tunnel",
+        # "boreas-2024-12-04-11-45" : "Skyway",
+        # "boreas-2024-12-04-11-56" : "Skyway",
+        # "boreas-2024-12-04-12-08" : "Skyway",
+        # "boreas-2024-12-04-12-19" : "Skyway",
+        # "boreas-2024-12-04-12-34" : "Skyway",
+        # "boreas-2024-12-04-14-28" : "Tunnel",
+        # "boreas-2024-12-04-14-34" : "Tunnel",
+        # "boreas-2024-12-04-14-38" : "Tunnel",
+        # "boreas-2024-12-04-14-44" : "Tunnel",
+        # "boreas-2024-12-04-14-50" : "Tunnel",
+        # "boreas-2024-12-04-14-59" : "Tunnel",
+        # "boreas-2024-12-04-15-04" : "Tunnel",
+        # "boreas-2024-12-04-15-10" : "Tunnel",
+        # "boreas-2024-12-04-15-19" : "Tunnel",
+        # "boreas-2024-12-04-15-24" : "Tunnel",
         "boreas-2024-12-05-14-12" : "Industrial",
         "boreas-2024-12-05-14-25" : "Suburbs",
         "boreas-2024-12-10-12-07" : "Regional",
@@ -57,46 +57,46 @@ sequence_type = {
         "boreas-2025-02-21-14-51" : "Suburbs",
         "boreas-2025-02-22-11-32" : "Suburbs",
         "boreas-2025-02-22-12-26" : "Suburbs",
-        "boreas-2025-02-15-15-58" : "UTIAS",
-        "boreas-2025-02-15-16-08" : "UTIAS",
-        "boreas-2025-02-15-16-16" : "UTIAS",
-        "boreas-2025-02-15-16-25" : "UTIAS",
-        "boreas-2025-02-15-16-33" : "UTIAS",
-        "boreas-2025-02-22-11-24" : "UTIAS",
-        "boreas-2025-02-22-11-52" : "UTIAS",
-        "boreas-2025-02-22-12-01" : "UTIAS",
-        "boreas-2025-02-22-12-09" : "UTIAS",
-        "boreas-2025-02-22-12-18" : "UTIAS",
-        "boreas-2025-07-18-10-00" : "Forest",
-        "boreas-2025-07-18-10-33" : "Forest",
-        "boreas-2025-07-18-11-00" : "Forest",
-        "boreas-2025-07-18-11-25" : "Forest",
-        "boreas-2025-07-18-11-53" : "Forest",
+        # "boreas-2025-02-15-15-58" : "UTIAS",
+        # "boreas-2025-02-15-16-08" : "UTIAS",
+        # "boreas-2025-02-15-16-16" : "UTIAS",
+        # "boreas-2025-02-15-16-25" : "UTIAS",
+        # "boreas-2025-02-15-16-33" : "UTIAS",
+        # "boreas-2025-02-22-11-24" : "UTIAS",
+        # "boreas-2025-02-22-11-52" : "UTIAS",
+        # "boreas-2025-02-22-12-01" : "UTIAS",
+        # "boreas-2025-02-22-12-09" : "UTIAS",
+        # "boreas-2025-02-22-12-18" : "UTIAS",
+        # "boreas-2025-07-18-10-00" : "Forest",
+        # "boreas-2025-07-18-10-33" : "Forest",
+        # "boreas-2025-07-18-11-00" : "Forest",
+        # "boreas-2025-07-18-11-25" : "Forest",
+        # "boreas-2025-07-18-11-53" : "Forest",
         "boreas-2025-07-18-14-55" : "Farm",
         "boreas-2025-07-18-15-12" : "Farm",
         "boreas-2025-07-18-15-30" : "Farm",
         "boreas-2025-07-18-15-48" : "Farm",
         "boreas-2025-07-18-16-05" : "Farm",
-        "boreas-2025-07-18-16-24" : "Freeway",
-        "boreas-2025-08-06-06-33" : "Urban",
-        "boreas-2025-08-06-07-05" : "Urban",
-        "boreas-2025-08-06-07-41" : "Urban",
-        "boreas-2025-08-06-08-35" : "Urban",
-        "boreas-2025-08-06-10-48" : "Urban",
-        "boreas-2025-08-06-11-32" : "Urban",
-        "boreas-2025-08-06-12-20" : "Urban",
-        "boreas-2025-08-13-07-54" : "Freeway",
+        # "boreas-2025-07-18-16-24" : "Freeway",
+        # "boreas-2025-08-06-06-33" : "Urban",
+        # "boreas-2025-08-06-07-05" : "Urban",
+        # "boreas-2025-08-06-07-41" : "Urban",
+        # "boreas-2025-08-06-08-35" : "Urban",
+        # "boreas-2025-08-06-10-48" : "Urban",
+        # "boreas-2025-08-06-11-32" : "Urban",
+        # "boreas-2025-08-06-12-20" : "Urban",
+        # "boreas-2025-08-13-07-54" : "Freeway",
         "boreas-2025-08-13-09-01" : "Farm",
         "boreas-2025-08-13-09-21" : "Farm",
         "boreas-2025-08-13-09-46" : "Farm",
         "boreas-2025-08-13-10-12" : "Farm",
         "boreas-2025-08-13-10-36" : "Farm",
-        "boreas-2025-08-13-11-52" : "Freeway",
+        # "boreas-2025-08-13-11-52" : "Freeway",
         '' : 'Unknown'
 }
 
 
-def main(result_path=default_result_path):
+def main(result_path, data_root):
     # Get the list of folders in the result path
     folders = [f for f in os.listdir(result_path) if osp.isdir(osp.join(result_path, f))]
     folders = sorted(folders)
@@ -109,9 +109,9 @@ def main(result_path=default_result_path):
         print('Processing folder: ', folder)
 
         try:
-            t_err, r_err, t_err_2d, r_err_2d = eval_odom(osp.join(result_path, folder, 'odometry_result'), gt_path, dim)
-        except:
-            print('Error in sequence: ', folder)
+            t_err, r_err, t_err_2d, r_err_2d = eval_odom(osp.join(result_path, folder, 'odometry_result'), data_root, dim)
+        except Exception as e:
+            print(f'Error in sequence {folder}: {e}')
             continue
 
         print('Mean translation error: ', t_err)
@@ -173,7 +173,7 @@ def compute_kitti_metrics(
     """
     # set step size
     if dim == 3:
-        step_size = 10  # every 10 frames should be 1 second
+        step_size = 4  # radar frames are approximately 4 Hz
     elif dim == 2:
         step_size = 4  # every 4 frames should be 1 second
     else:
@@ -249,7 +249,20 @@ def compute_kitti_metrics(
 
 
 
-# Copy paste from pyboreas
+def get_radar_sequence_poses_gt(path, seq):
+    all_poses, all_times, seq_lens, crop = [], [], [], []
+    for filename in seq:
+        sequence = filename[:-4]
+        poses, times = read_traj_file_gt(
+            osp.join(path, sequence, "applanix/radar_poses.csv"), np.eye(4), dim=3
+        )
+        all_poses.extend(poses)
+        all_times.extend(times)
+        seq_lens.append(len(times))
+        crop.append((0, len(times)))
+    return all_poses, all_times, seq_lens, crop
+
+
 def eval_odom(pred="test/demo/pred/3d", gt="test/demo/gt", dim=2):
     # evaluation mode
 
@@ -258,7 +271,9 @@ def eval_odom(pred="test/demo/pred/3d", gt="test/demo/gt", dim=2):
     T_pred, times_pred, seq_lens_pred = get_sequence_poses(pred, seq)
 
     # get corresponding groundtruth poses
-    T_gt, _, seq_lens_gt, crop = get_sequence_poses_gt(gt, seq, dim)
+    T_gt, times_gt, seq_lens_gt, crop = get_radar_sequence_poses_gt(gt, seq)
+    if times_pred != times_gt:
+        raise ValueError("Prediction and radar ground-truth timestamps differ.")
 
     # compute errors
     t_err, r_err, _, t_err_2d, r_err_2d = compute_kitti_metrics(
@@ -277,8 +292,10 @@ def eval_odom(pred="test/demo/pred/3d", gt="test/demo/gt", dim=2):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        result_path = sys.argv[1]
-    else:
-        result_path = default_result_path
-    main(result_path)
+    parser = argparse.ArgumentParser(description="Evaluate radar-rate 3DRO trajectories.")
+    parser.add_argument("result_path", nargs="?", default=default_result_path)
+    parser.add_argument("--data-root", default=os.getenv("VTRRDATA"))
+    args = parser.parse_args()
+    if args.data_root is None:
+        parser.error("--data-root is required when VTRRDATA is not set")
+    main(args.result_path, args.data_root)
