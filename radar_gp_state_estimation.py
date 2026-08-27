@@ -8,6 +8,7 @@ import os
 import utils
 import cv2
 import matplotlib.pyplot as plt
+from azimuth_odometry import planarPoses, writeAzimuthOdometryArrays
 
 
 def main():
@@ -33,7 +34,7 @@ def main():
         
 
     # Check if the output path exists
-    os.makedirs('output', exist_ok=True)
+    os.makedirs('output_2d', exist_ok=True)
 
     # Check the visualisation, saving, and verbose options
     visualise = config['log']['display']
@@ -155,7 +156,7 @@ def main():
 
 
         # Prepare output folders
-        seq_output_path = 'output/' + seq.ID
+        seq_output_path = 'output_2d/' + seq.ID
         os.makedirs(seq_output_path, exist_ok=True)
         odom_output_path = seq_output_path + '/odometry_result'
         if os.path.exists(odom_output_path):
@@ -178,6 +179,16 @@ def main():
         time_sum = 0
         opti_time_sum = 0
         time_counter = 0
+
+        frame_times_us = []
+        reference_poses = []
+        azimuth_times_us = []
+        frame_offsets = [0]
+        odom_transforms = []
+        frame_body_velocities = []
+        velocity_start_us = []
+        velocity_end_us = []
+        T_enu_odom = None
 
         # Tracking of the chirp up for doppler radar
         if not doppler_radar:
@@ -330,11 +341,36 @@ def main():
             if current_pos is not None:
                 current_pos = current_pos.squeeze()
                 current_rot = current_rot.squeeze()
+                scan_times_us = radar_frame.timestamps.flatten().astype(np.int64)
+                scan_world_poses = planarPoses(current_pos, current_rot)
                 
                 # Get the id closest to the GT (should query 
                 # the exact time instead of the closest, but 
                 # that the way it is done for now)
                 mid_id = np.argmin(np.abs(radar_frame.timestamps.flatten().astype(np.float64)*1e-6 - radar_frame.timestamp))
+
+                frame_time_us = radar_frame.timestamp_micro
+                if not scan_times_us[0] <= frame_time_us <= scan_times_us[-1]:
+                    raise ValueError("Radar reference timestamp lies outside its scan.")
+                frame_position = np.array([
+                    np.interp(frame_time_us, scan_times_us, current_pos[:, axis])
+                    for axis in range(2)
+                ])
+                frame_yaw = np.interp(frame_time_us, scan_times_us, np.unwrap(current_rot))
+                frame_world_pose = planarPoses(frame_position[None], [frame_yaw])[0]
+                if T_enu_odom is None:
+                    T_enu_odom = np.asarray(radar_frame.pose) @ np.linalg.inv(frame_world_pose)
+                reference_pose = np.linalg.inv(T_enu_odom @ frame_world_pose)
+                azimuth_poses = np.linalg.inv(T_enu_odom @ scan_world_poses)
+
+                frame_times_us.append(frame_time_us)
+                reference_poses.append(reference_pose)
+                azimuth_times_us.extend(scan_times_us)
+                frame_offsets.append(len(azimuth_times_us))
+                odom_transforms.extend(np.linalg.inv(reference_pose) @ azimuth_poses)
+                frame_body_velocities.append(velocity)
+                velocity_start_us.append(scan_times_us.min())
+                velocity_end_us.append(scan_times_us.max())
 
                 trans_mat = np.array([[np.cos(current_rot[mid_id]), -np.sin(current_rot[mid_id]), 0, current_pos[mid_id][0]],
                                     [np.sin(current_rot[mid_id]), np.cos(current_rot[mid_id]), 0, current_pos[mid_id][1]],
@@ -397,6 +433,25 @@ def main():
                 time_sum = time_end - time_start
             time_sum += time_end - time_start
             time_counter += 1
+
+        if not reference_poses:
+            raise ValueError("2D azimuth odometry requires pose estimation to be enabled.")
+        reference_poses = np.asarray(reference_poses)
+        frame_transforms = np.empty_like(reference_poses)
+        frame_transforms[0] = np.eye(4)
+        frame_transforms[1:] = reference_poses[1:] @ np.linalg.inv(reference_poses[:-1])
+        writeAzimuthOdometryArrays(
+            seq_output_path + '/odometry_result/azimuth_odometry.npz',
+            np.asarray(frame_times_us, dtype=np.int64),
+            reference_poses,
+            np.asarray(azimuth_times_us, dtype=np.int64),
+            np.asarray(frame_offsets, dtype=np.int64),
+            np.asarray(odom_transforms, dtype=np.float32),
+            frame_transforms,
+            np.asarray(frame_body_velocities),
+            np.asarray(velocity_start_us, dtype=np.int64),
+            np.asarray(velocity_end_us, dtype=np.int64),
+        )
 
 
     if visualise:

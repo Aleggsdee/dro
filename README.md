@@ -59,7 +59,8 @@ This implementation is a simple python script that can be run with the following
 python radar_gp_state_estimation.py
 ```
 
-It will fetch the configuration file locally and output the results in the `output` folder (created if it does not exist).
+It will fetch the configuration file locally and output the 2D results, including
+`azimuth_odometry.npz`, in the `output_2d` folder (created if it does not exist).
 
 __Note that the visualisation is enabled by default.
 However, this slows down the processing significantly.

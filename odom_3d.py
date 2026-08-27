@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import pyboreas as pb
 
+from azimuth_odometry import writeAzimuthOdometryArrays
+
 from pyboreas.utils.odometry import (
     read_traj_file_gt
 )
@@ -225,23 +227,18 @@ def writeAzimuthOdometry(
     if not np.allclose(frame_transforms[1:] @ reference_poses[:-1], reference_poses[1:], atol=1e-8):
         raise ValueError("Invalid inter-frame transform composition.")
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    np.savez(
+    writeAzimuthOdometryArrays(
         output_path,
-        frame_timestamps_us=frame_times_us,
-        reference_poses=reference_poses,
-        azimuth_timestamps_us=azimuth_times_us,
-        frame_offsets=frame_offsets,
-        odom_transforms=odom_transforms,
-        frame_transforms=frame_transforms,
-        frame_body_velocities=frame_body_velocities,
-        velocity_start_us=velocity_start_us,
-        velocity_end_us=velocity_end_us,
-        odom_transform_convention=np.asarray("right"),
+        frame_times_us,
+        reference_poses,
+        azimuth_times_us,
+        frame_offsets,
+        odom_transforms,
+        frame_transforms,
+        frame_body_velocities,
+        velocity_start_us,
+        velocity_end_us,
     )
-
-
-
 
 
 def droOdom3DOffline(imu_path, velocities_path, T_sensor_imu, scale_z, times_output, imu_bias_estimation=False, imu_bias_prior=None, yaw_only=False):
