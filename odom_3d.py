@@ -208,9 +208,11 @@ def writeAzimuthOdometry(
     for frame_idx in range(len(frame_times_us)):
         start, end = frame_offsets[frame_idx:frame_idx + 2]
         azimuth_poses = np.linalg.inv(anchor @ traj[azimuth_indices[start:end]])
-        # Match pipeline_dfo: P(azimuth) = P(frame reference) @ transform.
-        transforms = np.linalg.inv(reference_poses[frame_idx]) @ azimuth_poses
-        if not np.allclose(reference_poses[frame_idx] @ transforms, azimuth_poses, atol=1e-8):
+        # P(azimuth) = transform @ P(frame reference).
+        transforms = azimuth_poses @ np.linalg.inv(reference_poses[frame_idx])
+        if not np.allclose(
+            transforms @ reference_poses[frame_idx], azimuth_poses, atol=1e-8
+        ):
             raise ValueError(f"Invalid azimuth transform composition for frame {frame_idx}.")
         odom_transforms[start:end] = transforms
 

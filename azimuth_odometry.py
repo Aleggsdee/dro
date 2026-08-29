@@ -34,6 +34,21 @@ def writeAzimuthOdometryArrays(
     ):
         raise ValueError("Invalid inter-frame transform composition.")
 
+    for frame_idx, (start, end) in enumerate(
+        zip(frame_offsets[:-1], frame_offsets[1:])
+    ):
+        reference_rows = np.flatnonzero(
+            azimuth_times_us[start:end] == frame_times_us[frame_idx]
+        )
+        if len(reference_rows) != 1:
+            raise ValueError(
+                f"Frame {frame_idx} must have exactly one reference-timestamp azimuth."
+            )
+        if not np.allclose(
+            odom_transforms[start + reference_rows[0]], np.eye(4), atol=1e-6
+        ):
+            raise ValueError(f"Frame {frame_idx} reference transform is not identity.")
+
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     np.savez(
         output_path,
@@ -46,5 +61,5 @@ def writeAzimuthOdometryArrays(
         frame_body_velocities=frame_body_velocities,
         velocity_start_us=velocity_start_us,
         velocity_end_us=velocity_end_us,
-        odom_transform_convention=np.asarray("right"),
+        odom_transform_convention=np.asarray("left"),
     )

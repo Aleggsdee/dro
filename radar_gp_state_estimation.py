@@ -385,7 +385,7 @@ def main():
                 reference_poses.append(reference_pose)
                 azimuth_times_us.extend(scan_times_us)
                 frame_offsets.append(len(azimuth_times_us))
-                odom_transforms.extend(np.linalg.inv(reference_pose) @ azimuth_poses)
+                odom_transforms.extend(azimuth_poses @ np.linalg.inv(reference_pose))
                 frame_body_velocities.append(velocity)
                 velocity_start_us.append(scan_times_us.min())
                 velocity_end_us.append(scan_times_us.max())

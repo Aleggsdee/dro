@@ -163,8 +163,8 @@ def main():
 
     sequence = BoreasDataset(args.data_root, split=[[args.sequence]]).sequences[0]
     with np.load(args.azimuth_odometry) as data:
-        if data["odom_transform_convention"].item() != "right":
-            raise ValueError("Expected right-side pipeline_dfo odometry transforms.")
+        if data["odom_transform_convention"].item() != "left":
+            raise ValueError("Expected left-side pipeline_dfo odometry transforms.")
         frame_times = data["frame_timestamps_us"]
         reference_poses = data["reference_poses"]
         azimuth_times = data["azimuth_timestamps_us"]
@@ -214,6 +214,16 @@ def main():
     )
     if not np.array_equal(frame_times, expected_frame_times):
         raise ValueError("3DRO and Boreas radar frame timestamps differ.")
+    for frame_idx, (start, end) in enumerate(zip(offsets[:-1], offsets[1:])):
+        reference_rows = np.flatnonzero(
+            azimuth_times[start:end] == frame_times[frame_idx]
+        )
+        if len(reference_rows) != 1 or not np.allclose(
+            odom_transforms[start + reference_rows[0]], np.eye(4), atol=1e-6
+        ):
+            raise ValueError(
+                f"Frame {frame_idx} does not have one identity reference transform."
+            )
 
     sequence_root = osp.join(args.data_root, args.sequence)
     applanix_gt = load_applanix_ground_truth(sequence_root)
@@ -252,14 +262,8 @@ def main():
     repeated_gt_world_reference = np.repeat(
         gt_world_reference[frame_indices], counts, axis=0
     )
-    selected_reference_poses = np.repeat(reference_poses[frame_indices], counts, axis=0)
-    selected_left_odometry = (
-        selected_reference_poses
-        @ selected_odometry
-        @ np.linalg.inv(selected_reference_poses)
-    )
     gt_left_odometry = gt_azimuth_poses @ repeated_gt_world_reference
-    intra_errors = pose_errors(selected_left_odometry, gt_left_odometry)
+    intra_errors = pose_errors(selected_odometry, gt_left_odometry)
     intra_distances = np.linalg.norm(gt_left_odometry[:, :3, 3], axis=1)
     print_error_stats(
         "3DRO intra-frame increments vs 200 Hz GT",
